@@ -1,0 +1,8 @@
+Self-Pruning Neural Network - Final Results
+==================================================
+Test Accuracy: 58.96%
+Sparsity: 91.06%
+Total Gates: 3,675,136
+Minimum Gate: 0.000117
+Maximum Gate: 0.977154
+Mean Gate: 0.011640

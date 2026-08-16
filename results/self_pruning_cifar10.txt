@@ -1,0 +1,17 @@
+ self_pruning_cifar10/data.pklFB ccollections
+ OrderedDict
+ fc1.weightq ctorch._utils
+ _rebuild_tensor_v2
+ storageq ctorch
+ FloatStorage
+ fc1.gate_scoresq
+ fc2.weightq h fc2.biasq)h )Rq/tq0Rq1X fc2.gate_scoresq2h 5q3X cuda:0q4J tq5QK )Rq8tq9Rq:X
+ fc3.weightq;h
+ )RqAtqBRqCX fc3.biasqDh 7qEX cuda:0qFK
+ tqGQK
+ )RqJtqKRqLX fc3.gate_scoresqMh 8qNX cuda:0qOM tqPQK
+ )RqStqTRqUu}qVX _metadataqWh qY}qZX versionq[K fc3q`}qah[K susb.PK $#self_pruning_cifar10/.format_versionFB ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ1PK '*self_pruning_cifar10/.storage_alignmentFB& ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ64PK self_pruning_cifar10/byteorderFB. ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZlittlePK self_pruning_cifar10/data/0FB- ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ
+ >U M>dJK>Zl
+
+ self_pruning_cifar10/versionFB2 ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ3
+ +%self_pruning_cifar10/.data/serialization_idFB! ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ0197786035336920144305326303376137445161PK self_pruning_cifar10/data.pklPK self_pruning_cifar10/.format_versionPK self_pruning_cifar10/.storage_alignmentPK self_pruning_cifar10/byteorderPK self_pruning_cifar10/data/0PK self_pruning_cifar10/data/1PK self_pruning_cifar10/data/2PK self_pruning_cifar10/data/3PK self_pruning_cifar10/data/4PK self_pruning_cifar10/data/5PK self_pruning_cifar10/data/6PK self_pruning_cifar10/data/7PK self_pruning_cifar10/data/8PK self_pruning_cifar10/versionPK self_pruning_cifar10/.data/serialization_idPK<div id="preview-all"><div class="button" onclick="Wb('W',1)">Show all readable texts in this file...</div></div><div id="preview-all"><div class="button" onclick="Wb('B',1)">Show all bytes of this binary file...</div></div>
