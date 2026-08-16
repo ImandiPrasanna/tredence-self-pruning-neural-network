@@ -131,6 +131,10 @@ The high-λ model achieved:
 - Test Accuracy: 55.37%
 - Sparsity: 34.62%
 
+### Gate Distribution Plot
+
+![Gate Distribution](results/gate_distribution.png)
+
 ## Project Structure
 
 ```text
