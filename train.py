@@ -2,29 +2,26 @@ import os
 import random
 
 import numpy as np
+import matplotlib.pyplot as plt
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-
-import matplotlib.pyplot as plt
 
 
 # ============================================================
-# Configuration
+# CONFIGURATION
 # ============================================================
 
 BATCH_SIZE = 128
+EPOCHS = 50
 LEARNING_RATE = 0.001
-EPOCHS = 20
 
-# Lambda values used for the experiments
-LAMBDA_VALUES = [0.00001, 0.00005, 0.0002]
-
-# Gates below this value are considered pruned
-PRUNING_THRESHOLD = 1e-2
+FINAL_LAMBDA = 0.0001
+PRUNING_THRESHOLD = 0.01
 
 DATA_DIR = "./data"
 RESULTS_DIR = "./results"
@@ -33,50 +30,141 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
 # ============================================================
-# Device
+# DEVICE
 # ============================================================
 
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-print("Using device:", device)
+print("=" * 60)
+print("DEVICE INFORMATION")
+print("=" * 60)
+print("PyTorch version:", torch.__version__)
+print("Device:", device)
 
 if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
 
+print("=" * 60)
+
 
 # ============================================================
-# Prunable Linear Layer
+# REPRODUCIBILITY
+# ============================================================
+
+SEED = 42
+
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+
+# ============================================================
+# CIFAR-10 NORMALIZATION
+# ============================================================
+
+CIFAR_MEAN = (
+    0.4914,
+    0.4822,
+    0.4465
+)
+
+CIFAR_STD = (
+    0.2470,
+    0.2435,
+    0.2616
+)
+
+
+# ============================================================
+# DATA TRANSFORMS
+# ============================================================
+
+train_transform = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(CIFAR_MEAN, CIFAR_STD)
+])
+
+test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(CIFAR_MEAN, CIFAR_STD)
+])
+
+
+# ============================================================
+# LOAD CIFAR-10 DATASET
+# ============================================================
+
+print("\nDownloading/loading CIFAR-10 dataset...")
+
+train_dataset = torchvision.datasets.CIFAR10(
+    root=DATA_DIR,
+    train=True,
+    download=True,
+    transform=train_transform
+)
+
+test_dataset = torchvision.datasets.CIFAR10(
+    root=DATA_DIR,
+    train=False,
+    download=True,
+    transform=test_transform
+)
+
+train_loader = torch.utils.data.DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    num_workers=2,
+    pin_memory=torch.cuda.is_available()
+)
+
+test_loader = torch.utils.data.DataLoader(
+    test_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    num_workers=2,
+    pin_memory=torch.cuda.is_available()
+)
+
+print("Training images:", len(train_dataset))
+print("Test images:", len(test_dataset))
+
+
+# ============================================================
+# PRUNABLE LINEAR LAYER
 # ============================================================
 
 class PrunableLinear(nn.Module):
-    """
-    Linear layer with a learnable sigmoid gate for every weight.
-
-    Effective weight:
-        W_eff = W * sigmoid(gate_score)
-    """
 
     def __init__(self, in_features, out_features):
+
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
 
-        # Standard linear-layer weights
+        # Learnable network weights
         self.weight = nn.Parameter(
-            torch.randn(out_features, in_features) * 0.01
+            torch.empty(out_features, in_features)
         )
 
-        # Learnable gate score for every weight
+        # Learnable gate scores
         self.gate_scores = nn.Parameter(
-            torch.zeros(out_features, in_features)
+            torch.full(
+                (out_features, in_features),
+                3.0
+            )
         )
 
-        # Bias
-        self.bias = nn.Parameter(
-            torch.zeros(out_features)
+        # Kaiming initialization
+        nn.init.kaiming_uniform_(
+            self.weight,
+            a=np.sqrt(5)
         )
 
     def forward(self, x):
@@ -84,43 +172,55 @@ class PrunableLinear(nn.Module):
         # Convert gate scores into values between 0 and 1
         gates = torch.sigmoid(self.gate_scores)
 
-        # Apply gates to the weights
+        # Effective weight
         effective_weight = self.weight * gates
 
-        # Standard linear transformation
         return F.linear(
             x,
-            effective_weight,
-            self.bias
+            effective_weight
         )
 
 
 # ============================================================
-# Self-Pruning Neural Network
+# SELF-PRUNING NETWORK
 # ============================================================
 
 class SelfPruningNetwork(nn.Module):
 
     def __init__(self):
+
         super().__init__()
 
-        # CIFAR-10 image:
-        # 32 x 32 x 3 = 3072 input features
-        self.fc1 = PrunableLinear(32 * 32 * 3, 256)
+        # CIFAR-10:
+        # 3 channels × 32 × 32 = 3072 input features
 
-        self.fc2 = PrunableLinear(256, 128)
+        self.fc1 = PrunableLinear(
+            3 * 32 * 32,
+            1024
+        )
 
-        # 10 output classes for CIFAR-10
-        self.fc3 = PrunableLinear(128, 10)
+        self.fc2 = PrunableLinear(
+            1024,
+            512
+        )
+
+        self.fc3 = PrunableLinear(
+            512,
+            10
+        )
 
     def forward(self, x):
 
         # Flatten image
         x = x.view(x.size(0), -1)
 
-        x = F.relu(self.fc1(x))
+        x = F.relu(
+            self.fc1(x)
+        )
 
-        x = F.relu(self.fc2(x))
+        x = F.relu(
+            self.fc2(x)
+        )
 
         x = self.fc3(x)
 
@@ -128,14 +228,20 @@ class SelfPruningNetwork(nn.Module):
 
 
 # ============================================================
-# Sparsity Loss
+# CREATE MODEL
+# ============================================================
+
+model = SelfPruningNetwork().to(device)
+
+print("\nModel architecture:")
+print(model)
+
+
+# ============================================================
+# SPARSITY LOSS
 # ============================================================
 
 def calculate_sparsity_loss(model):
-    """
-    Calculate the sparsity penalty as the sum of all
-    sigmoid gate values across PrunableLinear layers.
-    """
 
     sparsity_loss = 0.0
 
@@ -147,52 +253,13 @@ def calculate_sparsity_loss(model):
                 module.gate_scores
             )
 
-            sparsity_loss += gates.sum()
+            sparsity_loss = sparsity_loss + gates.sum()
 
     return sparsity_loss
 
 
 # ============================================================
-# Calculate Model Sparsity
-# ============================================================
-
-def calculate_sparsity(
-    model,
-    threshold=PRUNING_THRESHOLD
-):
-    """
-    Calculate percentage of gates below the pruning threshold.
-    """
-
-    all_gates = []
-
-    for module in model.modules():
-
-        if isinstance(module, PrunableLinear):
-
-            gates = torch.sigmoid(
-                module.gate_scores
-            )
-
-            all_gates.append(
-                gates.detach().cpu().flatten()
-            )
-
-    all_gates = torch.cat(all_gates)
-
-    sparsity = (
-        (all_gates < threshold)
-        .float()
-        .mean()
-        .item()
-        * 100
-    )
-
-    return sparsity
-
-
-# ============================================================
-# Get All Gate Values
+# GET ALL GATES
 # ============================================================
 
 def get_all_gates(model):
@@ -217,92 +284,54 @@ def get_all_gates(model):
 
 
 # ============================================================
-# Training
+# CALCULATE SPARSITY
 # ============================================================
 
-def train_one_epoch(
+def calculate_sparsity(
     model,
-    train_loader,
-    optimizer,
-    criterion,
-    lambda_
+    threshold=PRUNING_THRESHOLD
 ):
 
-    model.train()
+    all_gates = get_all_gates(model)
 
-    total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
-
-    for images, labels in train_loader:
-
-        images = images.to(device)
-        labels = labels.to(device)
-
-        # Reset gradients
-        optimizer.zero_grad()
-
-        # Forward pass
-        outputs = model(images)
-
-        # Classification loss
-        classification_loss = criterion(
-            outputs,
-            labels
-        )
-
-        # Sparsity loss
-        sparsity_loss = calculate_sparsity_loss(
-            model
-        )
-
-        # Combined objective
-        loss = (
-            classification_loss
-            + lambda_ * sparsity_loss
-        )
-
-        # Backpropagation
-        loss.backward()
-
-        # Update weights and gate scores
-        optimizer.step()
-
-        # Statistics
-        total_loss += (
-            loss.item() * images.size(0)
-        )
-
-        _, predicted = outputs.max(1)
-
-        total_correct += (
-            predicted.eq(labels)
-            .sum()
-            .item()
-        )
-
-        total_samples += labels.size(0)
-
-    average_loss = (
-        total_loss / total_samples
+    sparsity = (
+        (all_gates < threshold)
+        .float()
+        .mean()
+        .item()
+        * 100
     )
 
-    accuracy = (
-        100.0
-        * total_correct
-        / total_samples
-    )
-
-    return average_loss, accuracy
+    return sparsity, all_gates
 
 
 # ============================================================
-# Evaluation
+# LAMBDA SCHEDULE
+# ============================================================
+
+def get_lambda(epoch):
+
+    # Epochs 1-10:
+    # No sparsity pressure
+
+    if epoch <= 10:
+        return 0.0
+
+    # Epochs 11-50:
+    # Gradually increase lambda
+
+    progress = (epoch - 10) / (EPOCHS - 10)
+
+    return FINAL_LAMBDA * progress
+
+
+# ============================================================
+# EVALUATION
 # ============================================================
 
 def evaluate_model(
     model,
-    test_loader
+    loader
 ):
 
     model.eval()
@@ -312,7 +341,7 @@ def evaluate_model(
 
     with torch.no_grad():
 
-        for images, labels in test_loader:
+        for images, labels in loader:
 
             images = images.to(device)
             labels = labels.to(device)
@@ -322,7 +351,8 @@ def evaluate_model(
             _, predicted = outputs.max(1)
 
             total_correct += (
-                predicted.eq(labels)
+                predicted
+                .eq(labels)
                 .sum()
                 .item()
             )
@@ -339,274 +369,388 @@ def evaluate_model(
 
 
 # ============================================================
-# Run One Lambda Experiment
+# TRAIN ONE EPOCH
 # ============================================================
 
-def run_experiment(
-    lambda_,
-    train_loader,
-    test_loader,
-    epochs=EPOCHS
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    lambda_
 ):
 
-    print("\n" + "=" * 60)
-    print(
-        f"Starting experiment with lambda = {lambda_}"
-    )
-    print("=" * 60)
+    model.train()
 
-    # Fresh model for every lambda
-    model = SelfPruningNetwork().to(device)
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
 
-    criterion = nn.CrossEntropyLoss()
+    for images, labels in loader:
 
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=LEARNING_RATE
-    )
+        images = images.to(device)
+        labels = labels.to(device)
 
-    for epoch in range(epochs):
+        optimizer.zero_grad()
 
-        train_loss, train_accuracy = (
-            train_one_epoch(
-                model,
-                train_loader,
-                optimizer,
-                criterion,
-                lambda_
-            )
+        # Forward pass
+        outputs = model(images)
+
+        # Classification loss
+        classification_loss = criterion(
+            outputs,
+            labels
         )
 
-        print(
-            f"Epoch {epoch + 1}/{epochs} | "
-            f"Loss: {train_loss:.4f} | "
-            f"Train Accuracy: "
-            f"{train_accuracy:.2f}%"
+        # Sparsity loss
+        sparsity_loss = calculate_sparsity_loss(
+            model
         )
+
+        # Total loss
+        loss = (
+            classification_loss
+            + lambda_ * sparsity_loss
+        )
+
+        # Backpropagation
+        loss.backward()
+
+        # Update weights and gates
+        optimizer.step()
+
+        # Statistics
+        total_loss += (
+            loss.item()
+            * images.size(0)
+        )
+
+        _, predicted = outputs.max(1)
+
+        total_correct += (
+            predicted
+            .eq(labels)
+            .sum()
+            .item()
+        )
+
+        total_samples += labels.size(0)
+
+    average_loss = (
+        total_loss
+        / total_samples
+    )
+
+    accuracy = (
+        100.0
+        * total_correct
+        / total_samples
+    )
+
+    return average_loss, accuracy
+
+
+# ============================================================
+# LOSS AND OPTIMIZER
+# ============================================================
+
+criterion = nn.CrossEntropyLoss()
+
+optimizer = optim.Adam(
+    model.parameters(),
+    lr=LEARNING_RATE
+)
+
+
+# ============================================================
+# TRAINING
+# ============================================================
+
+print("\n")
+print("=" * 60)
+print("STARTING TRAINING")
+print("=" * 60)
+
+history = {
+    "train_loss": [],
+    "train_accuracy": [],
+    "test_accuracy": [],
+    "lambda": [],
+    "sparsity": []
+}
+
+
+for epoch in range(
+    1,
+    EPOCHS + 1
+):
+
+    lambda_ = get_lambda(epoch)
+
+    train_loss, train_accuracy = train_one_epoch(
+        model,
+        train_loader,
+        optimizer,
+        criterion,
+        lambda_
+    )
 
     test_accuracy = evaluate_model(
         model,
         test_loader
     )
 
-    sparsity = calculate_sparsity(
+    sparsity, _ = calculate_sparsity(
         model
     )
 
-    print(
-        f"Test Accuracy: "
-        f"{test_accuracy:.2f}%"
+    history["train_loss"].append(
+        train_loss
     )
 
-    print(
-        f"Sparsity: "
-        f"{sparsity:.2f}%"
+    history["train_accuracy"].append(
+        train_accuracy
     )
 
-    return (
-        model,
-        test_accuracy,
+    history["test_accuracy"].append(
+        test_accuracy
+    )
+
+    history["lambda"].append(
+        lambda_
+    )
+
+    history["sparsity"].append(
         sparsity
     )
 
+    print(
+        f"Epoch {epoch:02d}/{EPOCHS} | "
+        f"λ: {lambda_:.8f} | "
+        f"Loss: {train_loss:.4f} | "
+        f"Train Accuracy: {train_accuracy:.2f}% | "
+        f"Test Accuracy: {test_accuracy:.2f}% | "
+        f"Sparsity: {sparsity:.2f}%"
+    )
+
 
 # ============================================================
-# Plot Gate Distribution
+# FINAL EVALUATION
 # ============================================================
 
-def plot_gate_distribution(
+final_accuracy = evaluate_model(
     model,
-    lambda_
-):
+    test_loader
+)
 
-    gates = get_all_gates(model).numpy()
+final_sparsity, all_gates = calculate_sparsity(
+    model,
+    PRUNING_THRESHOLD
+)
 
-    plt.figure(figsize=(10, 6))
+print("\n")
+print("=" * 60)
+print("FINAL RESULTS")
+print("=" * 60)
 
-    plt.hist(
-        gates,
-        bins=50,
-        edgecolor="black"
-    )
+print(
+    f"Test Accuracy : {final_accuracy:.2f}%"
+)
 
-    plt.axvline(
-        PRUNING_THRESHOLD,
-        linestyle="--",
-        label=(
-            f"Pruning threshold = "
-            f"{PRUNING_THRESHOLD}"
-        )
-    )
+print(
+    f"Sparsity      : {final_sparsity:.2f}%"
+)
 
-    plt.xlabel("Gate Value")
-    plt.ylabel("Number of Gates")
+print(
+    f"Total Gates   : {all_gates.numel():,}"
+)
 
-    plt.title(
-        "Distribution of Gate Values "
-        f"- High Lambda Model"
-    )
+print(
+    f"Minimum Gate  : {all_gates.min().item():.6f}"
+)
 
-    plt.legend()
+print(
+    f"Maximum Gate  : {all_gates.max().item():.6f}"
+)
 
-    plt.tight_layout()
+print(
+    f"Mean Gate     : {all_gates.mean().item():.6f}"
+)
 
-    output_path = os.path.join(
-        RESULTS_DIR,
-        "gate_distribution.png"
-    )
-
-    plt.savefig(
-        output_path,
-        dpi=300,
-        bbox_inches="tight"
-    )
-
-    plt.show()
-
-    print(
-        f"Gate distribution saved to: "
-        f"{output_path}"
-    )
+print("=" * 60)
 
 
 # ============================================================
-# Main
+# GATE STATISTICS
 # ============================================================
 
-def main():
+below_01 = (
+    (all_gates < 0.1)
+    .float()
+    .mean()
+    .item()
+    * 100
+)
 
-    # --------------------------------------------------------
-    # CIFAR-10 preprocessing
-    # --------------------------------------------------------
+below_005 = (
+    (all_gates < 0.05)
+    .float()
+    .mean()
+    .item()
+    * 100
+)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
+below_001 = (
+    (all_gates < 0.01)
+    .float()
+    .mean()
+    .item()
+    * 100
+)
 
-        transforms.Normalize(
-            mean=(0.5, 0.5, 0.5),
-            std=(0.5, 0.5, 0.5)
-        )
-    ])
+print("\nGate distribution statistics:")
 
-    # --------------------------------------------------------
-    # Load CIFAR-10
-    # --------------------------------------------------------
+print(
+    f"Below 0.10 : {below_01:.2f}%"
+)
 
-    train_dataset = torchvision.datasets.CIFAR10(
-        root=DATA_DIR,
-        train=True,
-        download=True,
-        transform=transform
-    )
+print(
+    f"Below 0.05 : {below_005:.2f}%"
+)
 
-    test_dataset = torchvision.datasets.CIFAR10(
-        root=DATA_DIR,
-        train=False,
-        download=True,
-        transform=transform
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available()
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available()
-    )
-
-    print(
-        f"\nTraining images: "
-        f"{len(train_dataset)}"
-    )
-
-    print(
-        f"Test images: "
-        f"{len(test_dataset)}"
-    )
-
-    # --------------------------------------------------------
-    # Run experiments
-    # --------------------------------------------------------
-
-    results = []
-
-    trained_models = {}
-
-    for lambda_ in LAMBDA_VALUES:
-
-        (
-            model,
-            test_accuracy,
-            sparsity
-        ) = run_experiment(
-            lambda_,
-            train_loader,
-            test_loader,
-            EPOCHS
-        )
-
-        results.append({
-            "lambda": lambda_,
-            "test_accuracy": test_accuracy,
-            "sparsity": sparsity
-        })
-
-        trained_models[lambda_] = model
-
-    # --------------------------------------------------------
-    # Print final results table
-    # --------------------------------------------------------
-
-    print("\n")
-    print("=" * 60)
-    print("FINAL EXPERIMENTAL RESULTS")
-    print("=" * 60)
-
-    print(
-        f"{'Lambda':<15}"
-        f"{'Test Accuracy':<20}"
-        f"{'Sparsity':<15}"
-    )
-
-    print("-" * 60)
-
-    for result in results:
-
-        print(
-            f"{result['lambda']:<15.5f}"
-            f"{result['test_accuracy']:<20.2f}"
-            f"{result['sparsity']:<15.2f}"
-        )
-
-    # --------------------------------------------------------
-    # Select highest-lambda model for visualization
-    # --------------------------------------------------------
-
-    high_lambda = max(
-        LAMBDA_VALUES
-    )
-
-    high_model = trained_models[
-        high_lambda
-    ]
-
-    plot_gate_distribution(
-        high_model,
-        high_lambda
-    )
+print(
+    f"Below 0.01 : {below_001:.2f}%"
+)
 
 
 # ============================================================
-# Program Entry Point
+# SAVE GATE DISTRIBUTION
 # ============================================================
 
-if __name__ == "__main__":
-    main()
+plt.figure(
+    figsize=(10, 6)
+)
+
+plt.hist(
+    all_gates.numpy(),
+    bins=50,
+    edgecolor="black"
+)
+
+plt.axvline(
+    PRUNING_THRESHOLD,
+    linestyle="--",
+    label="Pruning threshold = 0.01"
+)
+
+plt.xlabel("Gate Value")
+plt.ylabel("Number of Gates")
+
+plt.title(
+    "Distribution of Gate Values - Final Model"
+)
+
+plt.legend()
+
+plt.tight_layout()
+
+plot_path = os.path.join(
+    RESULTS_DIR,
+    "gate_distribution.png"
+)
+
+plt.savefig(
+    plot_path,
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.close()
+
+print(
+    f"\nGate distribution saved to: {plot_path}"
+)
+
+
+# ============================================================
+# SAVE FINAL RESULTS
+# ============================================================
+
+results_path = os.path.join(
+    RESULTS_DIR,
+    "final_results.txt"
+)
+
+with open(
+    results_path,
+    "w"
+) as f:
+
+    f.write(
+        "Self-Pruning Neural Network - Final Results\n"
+    )
+
+    f.write(
+        "=" * 50 + "\n"
+    )
+
+    f.write(
+        f"Test Accuracy: {final_accuracy:.2f}%\n"
+    )
+
+    f.write(
+        f"Sparsity: {final_sparsity:.2f}%\n"
+    )
+
+    f.write(
+        f"Total Gates: {all_gates.numel():,}\n"
+    )
+
+    f.write(
+        f"Minimum Gate: {all_gates.min().item():.6f}\n"
+    )
+
+    f.write(
+        f"Maximum Gate: {all_gates.max().item():.6f}\n"
+    )
+
+    f.write(
+        f"Mean Gate: {all_gates.mean().item():.6f}\n"
+    )
+
+    f.write(
+        f"Below 0.10: {below_01:.2f}%\n"
+    )
+
+    f.write(
+        f"Below 0.05: {below_005:.2f}%\n"
+    )
+
+    f.write(
+        f"Below 0.01: {below_001:.2f}%\n"
+    )
+
+print(
+    f"Final results saved to: {results_path}"
+)
+
+
+# ============================================================
+# SAVE MODEL
+# ============================================================
+
+model_path = os.path.join(
+    RESULTS_DIR,
+    "self_pruning_cifar10.pth"
+)
+
+torch.save(
+    model.state_dict(),
+    model_path
+)
+
+print(
+    f"Model saved to: {model_path}"
+)
+
+print("\nTraining and evaluation completed successfully!")
